@@ -25,3 +25,4 @@ pytype>=2020.6.1
 mypy
 ninja
 torchvision
+git+https://github.com/NVIDIA/dllogger

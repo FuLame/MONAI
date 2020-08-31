@@ -172,6 +172,76 @@ def train(args):
     dist.destroy_process_group()
 
 
+import dllogger as logger
+from dllogger import StdOutBackend, Verbosity, JSONStreamBackend
+import time
+
+
+def get_rank():
+    if not dist.is_available():
+        return 0
+    if not dist.is_initialized():
+        return 0
+    return dist.get_rank()
+
+
+def is_main_process():
+    return get_rank() == 0
+
+
+class LoggingCallback:
+    def __init__(self, logger, batch_size, num_gpus=1, warmup_steps=50, mode='train'):
+        self._logger = logger
+        self._batch_size = batch_size
+        self._num_gpus = num_gpus
+        self._warmup_steps = warmup_steps
+        self._step = 0
+        self._timestamps = []
+        self._mode = mode
+
+    def on_batch_start(self):
+        self._step += 1
+        if self._step >= self._warmup_steps:
+            torch.cuda.synchronize()
+            self._timestamps.append(time.time())
+
+    def on_fit_end(self):
+        deltas = np.array([self._timestamps[i + 1] - self._timestamps[i] for i in range(len(self._timestamps) - 1)])
+        stats = process_performance_stats(np.array(deltas),
+                                          self._batch_size * self._num_gpus,
+                                          self._mode)
+        if is_main_process():
+            self._logger.log(step=(), data={metric: float(value) for (metric, value) in stats})
+            self._logger.flush()
+
+    # def on_test_batch_start(self, trainer, pl_module):
+    #     self.on_batch_start(trainer, pl_module)
+    #
+    # def on_test_end(self, trainer, pl_module):
+    #     self.on_fit_end(trainer)
+    #
+    # def on_validation_end(self, trainer, pl_module):
+    #     if is_main_process():
+    #         self._logger.log(step=(pl_module.current_epoch,), data={"val_loss": pl_module._val_loss,
+    #                                                                 **pl_module._val_dice})
+    #         self._logger.flush()
+
+
+def process_performance_stats(timestamps, batch_size, mode):
+    timestamps_ms = 1000 * timestamps
+    latency_ms = timestamps_ms.mean()
+    std = timestamps_ms.std()
+    n = np.sqrt(len(timestamps_ms))
+    throughput_imgps = (1000.0 * batch_size / timestamps_ms).mean()
+
+    stats = [("throughput_{}".format(mode), str(throughput_imgps)),
+             ('latency_{}:'.format(mode), str(latency_ms))]
+    for ci, lvl in zip(["90%:", "95%:", "99%:"],
+                       [1.645, 1.960, 2.576]):
+        stats.append(("Latency_{} ".format(mode) + ci, str(latency_ms + lvl * std / n)))
+    return stats
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-d", "--dir", default="./testdata", type=str, help="directory to create random data")
